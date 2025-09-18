@@ -110,18 +110,26 @@ func (g *GitService) GetRecentBranches(count int, includeRemote bool, authors []
 	// Filter by authors if specified (main/master will always pass this filter)
 	var filteredBranches []Branch
 	if len(authors) > 0 && authors[0] != "all" {
+		fmt.Printf("DEBUG: Filtering %d branches by authors: %v (currentUser: %s)\n", len(allBranches), authors, currentUser)
 		for _, branch := range allBranches {
+			fmt.Printf("DEBUG: Checking branch '%s'...\n", branch.Name)
 			shouldInclude, err := g.branchHasAuthorCommits(branch, authors, currentUser)
 			if err != nil {
+				fmt.Printf("DEBUG: Error checking branch '%s': %v - including anyway\n", branch.Name, err)
 				// If we can't determine authorship, include the branch
 				filteredBranches = append(filteredBranches, branch)
 				continue
 			}
 			if shouldInclude {
+				fmt.Printf("DEBUG: Including branch '%s'\n", branch.Name)
 				filteredBranches = append(filteredBranches, branch)
+			} else {
+				fmt.Printf("DEBUG: Excluding branch '%s' (no matching author commits)\n", branch.Name)
 			}
 		}
+		fmt.Printf("DEBUG: After filtering: %d branches remain\n", len(filteredBranches))
 	} else {
+		fmt.Printf("DEBUG: No author filtering - showing all %d branches\n", len(allBranches))
 		filteredBranches = allBranches
 	}
 
@@ -501,8 +509,11 @@ func (g *GitService) branchHasAuthorCommits(branch Branch, authors []string, cur
 		branchName = strings.TrimSuffix(branchName, " (remote)")
 	}
 
+	fmt.Printf("DEBUG: branchHasAuthorCommits for '%s' (original: '%s')\n", branchName, branch.Name)
+
 	// Always include main/master branches regardless of author filtering
 	if branchName == "main" || branchName == "master" {
+		fmt.Printf("DEBUG: Branch '%s' is main/master - including\n", branchName)
 		return true, nil
 	}
 
@@ -512,27 +523,36 @@ func (g *GitService) branchHasAuthorCommits(branch Branch, authors []string, cur
 		gitBranchName = "origin/" + branchName
 	}
 
+	fmt.Printf("DEBUG: Using git branch name '%s' for commands\n", gitBranchName)
+
 	// Find the merge base with main/master to see commits unique to this branch
 	mergeBase, err := g.findMergeBase(gitBranchName)
 	if err != nil {
+		fmt.Printf("DEBUG: Could not find merge base for '%s': %v - including branch\n", gitBranchName, err)
 		// If we can't find merge base, include the branch
 		return true, nil
 	}
+
+	fmt.Printf("DEBUG: Found merge base for '%s': %s\n", gitBranchName, mergeBase)
 
 	// Get commits that are in this branch but not in the base branch
 	cmd := exec.Command("git", "log", "--format=%ae|%an", mergeBase+".."+gitBranchName)
 	output, err := cmd.Output()
 	if err != nil {
+		fmt.Printf("DEBUG: Could not get commits for '%s': %v - including branch\n", gitBranchName, err)
 		// If we can't get commits, include the branch
 		return true, nil
 	}
 
 	if strings.TrimSpace(string(output)) == "" {
-		// No unique commits in this branch
-		return false, nil
+		fmt.Printf("DEBUG: No unique commits in branch '%s' - but including anyway (branch exists)\n", branchName)
+		// No unique commits in this branch, but we'll include it anyway since it's a valid branch
+		// This handles cases where branches have been merged or are at the same point as main
+		return true, nil
 	}
 
 	commitLines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	fmt.Printf("DEBUG: Found %d unique commits in branch '%s'\n", len(commitLines), branchName)
 
 	// Check if any commits match our authors
 	for _, line := range commitLines {
@@ -548,21 +568,26 @@ func (g *GitService) branchHasAuthorCommits(branch Branch, authors []string, cur
 		email := strings.TrimSpace(parts[0])
 		name := strings.TrimSpace(parts[1])
 
+		fmt.Printf("DEBUG: Checking commit author: email='%s', name='%s'\n", email, name)
+
 		// Check against our author filters
 		for _, author := range authors {
 			if author == "mine" {
 				if email == currentUser || name == currentUser {
+					fmt.Printf("DEBUG: Found matching 'mine' commit in '%s' - including\n", branchName)
 					return true, nil
 				}
 			} else {
 				if strings.Contains(strings.ToLower(email), strings.ToLower(author)) ||
 					strings.Contains(strings.ToLower(name), strings.ToLower(author)) {
+					fmt.Printf("DEBUG: Found matching author '%s' commit in '%s' - including\n", author, branchName)
 					return true, nil
 				}
 			}
 		}
 	}
 
+	fmt.Printf("DEBUG: No matching author commits found in '%s' - excluding\n", branchName)
 	return false, nil
 }
 
