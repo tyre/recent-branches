@@ -37,8 +37,14 @@ func (tm *TableManager) SetupTable(branches []Branch) {
 		commitMsg := truncateString(branch.CommitTitle, 57)
 		commitDate := branch.CommitDate.Format("2006-01-02")
 
+		// Add current branch indicator
+		branchName := branch.Name
+		if branch.RelativeTime == "active now" {
+			branchName = "* " + branch.Name // Add asterisk for current branch
+		}
+
 		row := table.Row{
-			branch.Name,
+			branchName,
 			branch.RelativeTime,
 			commitDate,
 			commitMsg,

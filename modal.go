@@ -20,13 +20,26 @@ const (
 	ModalActionCancel
 )
 
+// ModalFocus represents the different focusable sections in the modal
+type ModalFocus int
+
+const (
+	FocusGitStatus   ModalFocus = iota // Git status file list
+	FocusSubject                       // Commit subject field
+	FocusDescription                   // Commit description field
+)
+
 type CommitModal struct {
-	visible      bool
-	subject      textinput.Model
-	description  textarea.Model
-	focusIndex   int
-	action       ModalAction
-	targetBranch string
+	visible       bool
+	subject       textinput.Model
+	description   textarea.Model
+	focusIndex    ModalFocus
+	action        ModalAction
+	targetBranch  string
+	gitStatus     []GitFileStatus
+	expandedFiles map[string]bool
+	selectedFile  int // Index of currently selected file
+	gitService    *GitService
 
 	// Key bindings
 	keys CommitModalKeyMap
@@ -72,6 +85,12 @@ var commitModalKeys = CommitModalKeyMap{
 		key.WithHelp("↓", "down"),
 	),
 }
+
+// Add new key binding for expanding files
+var expandKey = key.NewBinding(
+	key.WithKeys("space", "enter"),
+	key.WithHelp("space/enter", "expand file"),
+)
 
 var (
 	modalStyle = lipgloss.NewStyle().
@@ -126,10 +145,12 @@ func NewCommitModal() *CommitModal {
 	description.SetHeight(5)
 
 	return &CommitModal{
-		subject:     subject,
-		description: description,
-		keys:        commitModalKeys,
-		focusIndex:  0,
+		subject:       subject,
+		description:   description,
+		keys:          commitModalKeys,
+		focusIndex:    FocusGitStatus,
+		expandedFiles: make(map[string]bool),
+		gitService:    NewGitService(),
 	}
 }
 
@@ -137,11 +158,22 @@ func (m *CommitModal) Show(targetBranch string) {
 	m.visible = true
 	m.targetBranch = targetBranch
 	m.action = ModalActionNone
-	m.focusIndex = 0
-	m.subject.Focus()
+	m.focusIndex = FocusGitStatus // Start focused on git status section
+	m.subject.Blur()              // Start with subject unfocused
 	m.description.Blur()
 	m.subject.SetValue("")
 	m.description.SetValue("")
+
+	// Load git status
+	if status, err := m.gitService.GetGitStatus(); err == nil {
+		m.gitStatus = status
+	} else {
+		m.gitStatus = []GitFileStatus{}
+	}
+
+	// Reset expanded files and selected file
+	m.expandedFiles = make(map[string]bool)
+	m.selectedFile = 0
 }
 
 func (m *CommitModal) Hide() {
@@ -199,28 +231,44 @@ func (m *CommitModal) Update(msg tea.Msg) (*CommitModal, tea.Cmd) {
 			m.prevField()
 
 		case key.Matches(msg, m.keys.Up):
-			if m.focusIndex == 1 { // If in description, move to subject
-				m.focusIndex = 0
+			if m.focusIndex == FocusGitStatus { // In git status section
+				if len(m.gitStatus) > 0 && m.selectedFile > 0 {
+					m.selectedFile--
+				}
+			} else if m.focusIndex == FocusDescription { // If in description, move to subject
+				m.focusIndex = FocusSubject
 				m.subject.Focus()
 				m.description.Blur()
 			}
 
 		case key.Matches(msg, m.keys.Down):
-			if m.focusIndex == 0 { // If in subject, move to description
-				m.focusIndex = 1
+			if m.focusIndex == FocusGitStatus { // In git status section
+				if len(m.gitStatus) > 0 && m.selectedFile < len(m.gitStatus)-1 {
+					m.selectedFile++
+				}
+			} else if m.focusIndex == FocusSubject { // If in subject, move to description
+				m.focusIndex = FocusDescription
 				m.subject.Blur()
 				m.description.Focus()
 			}
 
+		case msg.String() == " " || msg.String() == "enter":
+			// Toggle expansion of selected file (only when focused on git status)
+			if m.focusIndex == FocusGitStatus && len(m.gitStatus) > 0 && m.selectedFile < len(m.gitStatus) {
+				selectedFilePath := m.gitStatus[m.selectedFile].Path
+				m.expandedFiles[selectedFilePath] = !m.expandedFiles[selectedFilePath]
+			}
+
 		default:
 			// Handle input in the focused field
-			if m.focusIndex == 0 {
+			if m.focusIndex == FocusSubject { // Subject field
 				m.subject, cmd = m.subject.Update(msg)
 				cmds = append(cmds, cmd)
-			} else {
+			} else if m.focusIndex == FocusDescription { // Description field
 				m.description, cmd = m.description.Update(msg)
 				cmds = append(cmds, cmd)
 			}
+			// When focusIndex == FocusGitStatus, don't pass keys to text inputs
 		}
 	}
 
@@ -228,25 +276,28 @@ func (m *CommitModal) Update(msg tea.Msg) (*CommitModal, tea.Cmd) {
 }
 
 func (m *CommitModal) nextField() {
-	m.focusIndex = (m.focusIndex + 1) % 2
-	if m.focusIndex == 0 {
-		m.subject.Focus()
-		m.description.Blur()
-	} else {
-		m.subject.Blur()
-		m.description.Focus()
-	}
+	m.focusIndex = ModalFocus((int(m.focusIndex) + 1) % 3) // Cycle through all focus states
+	m.updateFieldFocus()
 }
 
 func (m *CommitModal) prevField() {
-	m.focusIndex--
-	if m.focusIndex < 0 {
-		m.focusIndex = 1
+	newIndex := int(m.focusIndex) - 1
+	if newIndex < 0 {
+		newIndex = 2 // FocusDescription
 	}
-	if m.focusIndex == 0 {
+	m.focusIndex = ModalFocus(newIndex)
+	m.updateFieldFocus()
+}
+
+func (m *CommitModal) updateFieldFocus() {
+	switch m.focusIndex {
+	case FocusGitStatus: // Git status section
+		m.subject.Blur()
+		m.description.Blur()
+	case FocusSubject: // Subject field
 		m.subject.Focus()
 		m.description.Blur()
-	} else {
+	case FocusDescription: // Description field
 		m.subject.Blur()
 		m.description.Focus()
 	}
@@ -259,6 +310,9 @@ func (m *CommitModal) View() string {
 
 	title := modalTitleStyle.Render(fmt.Sprintf("Uncommitted Changes - Switching to '%s'", m.targetBranch))
 
+	// Git status section
+	statusSection := m.renderGitStatus()
+
 	subjectLabel := labelStyle.Render("Commit Subject:")
 	subjectInput := m.subject.View()
 
@@ -270,17 +324,19 @@ func (m *CommitModal) View() string {
 	stashBtn := buttonStyle.Render("Stash & Switch")
 	cancelBtn := buttonStyle.Render("Cancel")
 
-	if m.focusIndex == 2 { // If we were to add button focus
+	if m.focusIndex == FocusDescription { // If we were to add button focus
 		commitBtn = buttonActiveStyle.Render("Commit & Switch")
 	}
 
 	buttons := lipgloss.JoinHorizontal(lipgloss.Left, commitBtn, stashBtn, cancelBtn)
 
-	help := modalHelpStyle.Render("ctrl+s: commit • ctrl+t: stash • tab/shift+tab: navigate • esc: cancel")
+	help := modalHelpStyle.Render("ctrl+s: commit • ctrl+t: stash • space: expand file • esc: cancel")
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		title,
+		"",
+		statusSection,
 		"",
 		subjectLabel,
 		subjectInput,
@@ -299,30 +355,132 @@ func (m *CommitModal) View() string {
 	return lipgloss.Place(80, 25, lipgloss.Center, lipgloss.Center, modal)
 }
 
+func (m *CommitModal) renderGitStatus() string {
+	if len(m.gitStatus) == 0 {
+		return labelStyle.Render("No changes detected")
+	}
+
+	filePathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))                                   // Cyan
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")) // Highlighted
+
+	var lines []string
+	focusIndicator := ""
+	if m.focusIndex == FocusGitStatus {
+		focusIndicator = " [FOCUSED - ↑↓ to navigate, space to expand]"
+	}
+	lines = append(lines, labelStyle.Render("Changed Files:"+focusIndicator))
+
+	for i, file := range m.gitStatus {
+		// Status indicator
+		var statusIcon, statusColor string
+		switch file.Status {
+		case "A":
+			statusIcon = "+"
+			statusColor = "42" // Green
+		case "M":
+			statusIcon = "~"
+			statusColor = "226" // Yellow
+		case "D":
+			statusIcon = "-"
+			statusColor = "196" // Red
+		case "R":
+			statusIcon = "→"
+			statusColor = "39" // Cyan
+		default:
+			statusIcon = "?"
+			statusColor = "241" // Gray
+		}
+
+		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Bold(true)
+
+		// Staged/unstaged indicators
+		stagedIndicator := ""
+		if file.StagedStatus != " " && file.StagedStatus != "?" {
+			stagedIndicator += "S"
+		}
+		if file.WorkStatus != " " && file.WorkStatus != "?" {
+			stagedIndicator += "W"
+		}
+		if stagedIndicator == "" {
+			stagedIndicator = " "
+		}
+
+		// File line
+		expandIcon := "▶"
+		if m.expandedFiles[file.Path] {
+			expandIcon = "▼"
+		}
+
+		// Selection indicator
+		selectionIndicator := " "
+		if i == m.selectedFile && m.focusIndex == FocusGitStatus {
+			selectionIndicator = ">"
+		}
+
+		// Format line count statistics
+		var lineStats string
+		if file.LinesAdded > 0 || file.LinesDeleted > 0 {
+			addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))    // Green
+			deletedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Red
+
+			if file.LinesAdded > 0 && file.LinesDeleted > 0 {
+				lineStats = fmt.Sprintf(" (%s, %s)",
+					addedStyle.Render(fmt.Sprintf("+%d", file.LinesAdded)),
+					deletedStyle.Render(fmt.Sprintf("-%d", file.LinesDeleted)))
+			} else if file.LinesAdded > 0 {
+				lineStats = fmt.Sprintf(" (%s)",
+					addedStyle.Render(fmt.Sprintf("+%d", file.LinesAdded)))
+			} else if file.LinesDeleted > 0 {
+				lineStats = fmt.Sprintf(" (%s)",
+					deletedStyle.Render(fmt.Sprintf("-%d", file.LinesDeleted)))
+			}
+		}
+
+		fileLine := fmt.Sprintf(" %s %s %s [%s] %s%s",
+			selectionIndicator,
+			expandIcon,
+			statusStyle.Render(statusIcon),
+			stagedIndicator,
+			filePathStyle.Render(file.Path),
+			lineStats)
+
+		// Highlight selected file
+		if i == m.selectedFile && m.focusIndex == FocusGitStatus {
+			fileLine = selectedStyle.Render(fileLine)
+		}
+
+		lines = append(lines, fileLine)
+
+		// Show diff if expanded
+		if m.expandedFiles[file.Path] {
+			if diff, err := m.gitService.GetFileDiff(file.Path); err == nil {
+				// Truncate diff for display (show first few lines)
+				diffLines := strings.Split(diff, "\n")
+				maxLines := 5
+				if len(diffLines) > maxLines {
+					diffLines = diffLines[:maxLines]
+					diffLines = append(diffLines, "    ... (truncated)")
+				}
+
+				diffStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+				for _, diffLine := range diffLines {
+					if strings.TrimSpace(diffLine) != "" {
+						lines = append(lines, "    "+diffStyle.Render(diffLine))
+					}
+				}
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func (m *CommitModal) ViewOverlay(content string) string {
 	if !m.visible {
 		return content
 	}
 
-	// Create a dim overlay effect
-	lines := strings.Split(content, "\n")
-	dimmedLines := make([]string, len(lines))
-
-	for i, line := range lines {
-		// Dim the background content
-		dimmedLines[i] = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Render(line)
-	}
-
-	dimmedContent := strings.Join(dimmedLines, "\n")
-
-	// Overlay the modal on top
-	return lipgloss.Place(
-		80, 25,
-		lipgloss.Center, lipgloss.Center,
-		m.View(),
-		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(lipgloss.Color("240")),
-	) + dimmedContent
+	// Simply return the modal view - this replaces the entire screen when modal is visible
+	// This is simpler and more reliable than trying to overlay
+	return m.View()
 }

@@ -241,6 +241,178 @@ func (g *GitService) HasUncommittedChanges() (bool, error) {
 	return hasChanges, nil
 }
 
+// GitFileStatus represents the status of a file in git
+type GitFileStatus struct {
+	Path         string
+	Status       string // M, A, D, R, C, U, etc.
+	StagedStatus string // Status in index
+	WorkStatus   string // Status in working tree
+	LinesAdded   int    // Number of lines added
+	LinesDeleted int    // Number of lines deleted
+}
+
+// GetGitStatus returns detailed git status information
+func (g *GitService) GetGitStatus() ([]GitFileStatus, error) {
+	cmd := exec.Command("git", "status", "--porcelain=v1")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get git status: %v", err)
+	}
+
+	var files []GitFileStatus
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		if len(line) < 3 {
+			continue
+		}
+
+		stagedStatus := string(line[0])
+		workStatus := string(line[1])
+		path := strings.TrimSpace(line[2:])
+
+		// Determine overall status
+		status := "M" // Modified by default
+		if stagedStatus == "A" || workStatus == "A" {
+			status = "A" // Added
+		} else if stagedStatus == "D" || workStatus == "D" {
+			status = "D" // Deleted
+		} else if stagedStatus == "R" || workStatus == "R" {
+			status = "R" // Renamed
+		} else if stagedStatus == "C" || workStatus == "C" {
+			status = "C" // Copied
+		} else if stagedStatus == "U" || workStatus == "U" {
+			status = "U" // Unmerged
+		}
+
+		// Get line statistics for this file
+		linesAdded, linesDeleted := g.getFileLineStats(path, stagedStatus, workStatus)
+
+		files = append(files, GitFileStatus{
+			Path:         path,
+			Status:       status,
+			StagedStatus: stagedStatus,
+			WorkStatus:   workStatus,
+			LinesAdded:   linesAdded,
+			LinesDeleted: linesDeleted,
+		})
+	}
+
+	return files, nil
+}
+
+// getFileLineStats returns the number of lines added and deleted for a specific file
+func (g *GitService) getFileLineStats(filePath, stagedStatus, workStatus string) (int, int) {
+	var totalAdded, totalDeleted int
+
+	// Get staged changes stats
+	if stagedStatus != " " && stagedStatus != "?" {
+		added, deleted := g.getNumstatForFile(filePath, true)
+		totalAdded += added
+		totalDeleted += deleted
+	}
+
+	// Get unstaged changes stats
+	if workStatus != " " && workStatus != "?" {
+		added, deleted := g.getNumstatForFile(filePath, false)
+		totalAdded += added
+		totalDeleted += deleted
+	}
+
+	return totalAdded, totalDeleted
+}
+
+// getNumstatForFile gets numstat for a specific file (staged or unstaged)
+func (g *GitService) getNumstatForFile(filePath string, staged bool) (int, int) {
+	var cmd *exec.Cmd
+	if staged {
+		cmd = exec.Command("git", "diff", "--numstat", "--cached", filePath)
+	} else {
+		cmd = exec.Command("git", "diff", "--numstat", filePath)
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, 0
+	}
+
+	return g.parseNumstatOutput(string(output))
+}
+
+// parseNumstatOutput parses the output of git diff --numstat
+func (g *GitService) parseNumstatOutput(output string) (int, int) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	var totalAdded, totalDeleted int
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+
+		// Handle binary files (marked with "-")
+		if parts[0] == "-" || parts[1] == "-" {
+			continue
+		}
+
+		// Parse added lines
+		if added := parseInt(parts[0]); added >= 0 {
+			totalAdded += added
+		}
+
+		// Parse deleted lines
+		if deleted := parseInt(parts[1]); deleted >= 0 {
+			totalDeleted += deleted
+		}
+	}
+
+	return totalAdded, totalDeleted
+}
+
+// parseInt safely parses an integer, returning -1 on error
+func parseInt(s string) int {
+	var result int
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return -1
+		}
+		result = result*10 + int(r-'0')
+	}
+	return result
+}
+
+// GetFileDiff returns the diff for a specific file
+func (g *GitService) GetFileDiff(filePath string) (string, error) {
+	// Get both staged and unstaged changes
+	stagedCmd := exec.Command("git", "diff", "--cached", filePath)
+	stagedOutput, _ := stagedCmd.Output()
+
+	unstagedCmd := exec.Command("git", "diff", filePath)
+	unstagedOutput, _ := unstagedCmd.Output()
+
+	diff := ""
+	if len(stagedOutput) > 0 {
+		diff += "=== Staged Changes ===\n" + string(stagedOutput) + "\n"
+	}
+	if len(unstagedOutput) > 0 {
+		diff += "=== Unstaged Changes ===\n" + string(unstagedOutput) + "\n"
+	}
+
+	if diff == "" {
+		return "No changes to display", nil
+	}
+
+	return diff, nil
+}
+
 func (g *GitService) CommitChanges(subject, description string) error {
 	// Stage all changes first
 	stageCmd := exec.Command("git", "add", "-A")

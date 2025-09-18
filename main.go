@@ -156,10 +156,8 @@ func main() {
 	}
 
 	// Add initial startup logging
-	fmt.Printf("DEBUG: About to add startup logs\n")
 	m.logInfo("Application started - Recent Branches v1.0")
 	m.logDebug("Configuration: count=%d, includeRemote=%v, authors=%v", m.count, m.includeRemote, m.authors)
-	fmt.Printf("DEBUG: Added %d log entries\n", len(m.logViewer.entries))
 
 	if err := m.loadBranches(); err != nil {
 		m.logError("Failed to load branches: %v", err)
@@ -170,7 +168,6 @@ func main() {
 	m.logSuccess("Successfully loaded %d branches", len(m.branches))
 	m.setupTable()
 	m.logDebug("Table setup complete")
-	fmt.Printf("DEBUG: Total log entries after setup: %d\n", len(m.logViewer.entries))
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -343,6 +340,25 @@ func (m *model) setupTable() {
 
 func (m *model) switchToBranch(branchName string) error {
 	m.logInfo("Attempting to switch to branch: %s", branchName)
+
+	// Get current branch to check if we're already on it
+	currentBranch, err := m.gitService.GetCurrentBranch()
+	if err != nil {
+		m.logError("Failed to get current branch: %v", err)
+		return fmt.Errorf("failed to get current branch: %v", err)
+	}
+
+	// Clean branch name (remove remote indicator)
+	cleanBranchName := branchName
+	if strings.HasSuffix(branchName, " (remote)") {
+		cleanBranchName = strings.TrimSuffix(branchName, " (remote)")
+	}
+
+	// Check if we're already on this branch
+	if cleanBranchName == currentBranch {
+		m.logInfo("Already on branch %s, no switch needed", currentBranch)
+		return fmt.Errorf("already on branch '%s'", currentBranch)
+	}
 
 	// Check for uncommitted changes first
 	m.logDebug("Checking for uncommitted changes...")
@@ -615,3 +631,5 @@ func getRemoteText(includeRemote bool) string {
 	}
 	return "local only"
 }
+
+// Test change for modal
