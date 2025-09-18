@@ -55,7 +55,7 @@ func (tm *TableManager) SetupTable(branches []Branch) {
 		table.WithColumns(columns),
 		table.WithRows(rows),
 		table.WithFocused(true),
-		table.WithHeight(min(len(rows), 20)), // Limit max height
+		table.WithHeight(min(len(rows)+1, 20)), // Limit max height
 	)
 
 	s := table.DefaultStyles()

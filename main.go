@@ -5,10 +5,49 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// LogLevel represents different types of log messages
+type LogLevel int
+
+const (
+	DEBUG LogLevel = iota
+	INFO
+	ERROR
+	SUCCESS
+)
+
+// LogEntry represents a single log entry with level and timestamp
+type LogEntry struct {
+	Level     LogLevel
+	Message   string
+	Timestamp time.Time
+}
+
+// LogViewer manages the scrollable log display
+type LogViewer struct {
+	entries      []LogEntry
+	scrollOffset int
+	maxVisible   int
+	maxEntries   int
+	focused      bool
+	autoScroll   bool
+}
+
+func NewLogViewer() *LogViewer {
+	return &LogViewer{
+		entries:      make([]LogEntry, 0),
+		scrollOffset: 0,
+		maxVisible:   8,
+		maxEntries:   50,
+		focused:      false,
+		autoScroll:   true,
+	}
+}
 
 var (
 	// Styles
@@ -29,12 +68,45 @@ var (
 			Foreground(lipgloss.Color("42")).
 			Bold(true).
 			Padding(0, 1)
+
+	// Log styles
+	logContainerStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1).
+				Height(8)
+
+	logTitleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("205")).
+			Bold(true)
+
+	debugStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
+	infoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39"))
+
+	logErrorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196"))
+
+	logSuccessStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42"))
+
+	timestampStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241"))
+
+	logFocusedStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("39")).
+			Padding(0, 1).
+			Height(8)
 )
 
 type model struct {
 	tableManager  *TableManager
 	gitService    *GitService
 	commitModal   *CommitModal
+	logViewer     *LogViewer
 	branches      []Branch
 	err           error
 	count         int
@@ -42,13 +114,7 @@ type model struct {
 	quitting      bool
 	includeRemote bool
 	authors       []string
-}
-
-func debugLog(msg string, args ...interface{}) {
-	if f, err := os.OpenFile("debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, msg+"\n", args...)
-		f.Close()
-	}
+	logs          []string // Keep for backward compatibility
 }
 
 func main() {
@@ -86,20 +152,180 @@ func main() {
 		tableManager:  NewTableManager(),
 		gitService:    NewGitService(),
 		commitModal:   NewCommitModal(),
+		logViewer:     NewLogViewer(),
 	}
 
+	// Add initial startup logging
+	fmt.Printf("DEBUG: About to add startup logs\n")
+	m.logInfo("Application started - Recent Branches v1.0")
+	m.logDebug("Configuration: count=%d, includeRemote=%v, authors=%v", m.count, m.includeRemote, m.authors)
+	fmt.Printf("DEBUG: Added %d log entries\n", len(m.logViewer.entries))
+
 	if err := m.loadBranches(); err != nil {
+		m.logError("Failed to load branches: %v", err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
+	m.logSuccess("Successfully loaded %d branches", len(m.branches))
 	m.setupTable()
+	m.logDebug("Table setup complete")
+	fmt.Printf("DEBUG: Total log entries after setup: %d\n", len(m.logViewer.entries))
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running program: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func (m *model) addLog(msg string, args ...interface{}) {
+	logMsg := fmt.Sprintf(msg, args...)
+	m.logs = append(m.logs, logMsg)
+	// Keep only last 10 log messages
+	if len(m.logs) > 10 {
+		m.logs = m.logs[1:]
+	}
+}
+
+// Enhanced logging methods
+func (m *model) logDebug(msg string, args ...interface{}) {
+	m.addLogEntry(DEBUG, msg, args...)
+}
+
+func (m *model) logInfo(msg string, args ...interface{}) {
+	m.addLogEntry(INFO, msg, args...)
+}
+
+func (m *model) logError(msg string, args ...interface{}) {
+	m.addLogEntry(ERROR, msg, args...)
+}
+
+func (m *model) logSuccess(msg string, args ...interface{}) {
+	m.addLogEntry(SUCCESS, msg, args...)
+}
+
+func (m *model) addLogEntry(level LogLevel, msg string, args ...interface{}) {
+	entry := LogEntry{
+		Level:     level,
+		Message:   fmt.Sprintf(msg, args...),
+		Timestamp: time.Now(),
+	}
+
+	m.logViewer.entries = append(m.logViewer.entries, entry)
+
+	// Keep only maxEntries
+	if len(m.logViewer.entries) > m.logViewer.maxEntries {
+		m.logViewer.entries = m.logViewer.entries[1:]
+		if m.logViewer.scrollOffset > 0 {
+			m.logViewer.scrollOffset--
+		}
+	}
+
+	// Auto-scroll to bottom if enabled
+	if m.logViewer.autoScroll {
+		maxScroll := len(m.logViewer.entries) - m.logViewer.maxVisible
+		if maxScroll > 0 {
+			m.logViewer.scrollOffset = maxScroll
+		}
+	}
+}
+
+func (m *model) clearLogs() {
+	m.logViewer.entries = make([]LogEntry, 0)
+	m.logViewer.scrollOffset = 0
+	m.logViewer.autoScroll = true
+}
+
+// LogViewer methods
+func (lv *LogViewer) ScrollUp() {
+	if lv.scrollOffset > 0 {
+		lv.scrollOffset--
+		lv.autoScroll = false
+	}
+}
+
+func (lv *LogViewer) ScrollDown() {
+	maxScroll := len(lv.entries) - lv.maxVisible
+	if maxScroll > 0 && lv.scrollOffset < maxScroll {
+		lv.scrollOffset++
+		// Check if we're at the bottom to re-enable auto-scroll
+		if lv.scrollOffset == maxScroll {
+			lv.autoScroll = true
+		}
+	}
+}
+
+func (lv *LogViewer) ToggleFocus() {
+	lv.focused = !lv.focused
+}
+
+func (lv *LogViewer) View() string {
+	if len(lv.entries) == 0 {
+		emptyMsg := "No debug logs yet..."
+		style := logContainerStyle
+		if lv.focused {
+			style = logFocusedStyle
+		}
+		return style.Render(timestampStyle.Render(emptyMsg))
+	}
+
+	// Calculate visible entries
+	start := lv.scrollOffset
+	end := start + lv.maxVisible
+	if end > len(lv.entries) {
+		end = len(lv.entries)
+	}
+	if start >= len(lv.entries) {
+		start = len(lv.entries) - lv.maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	var lines []string
+	for i := start; i < end; i++ {
+		entry := lv.entries[i]
+		timestamp := entry.Timestamp.Format("15:04:05")
+
+		var levelStr string
+		var style lipgloss.Style
+
+		switch entry.Level {
+		case DEBUG:
+			levelStr = "DEBUG"
+			style = debugStyle
+		case INFO:
+			levelStr = "INFO "
+			style = infoStyle
+		case ERROR:
+			levelStr = "ERROR"
+			style = logErrorStyle
+		case SUCCESS:
+			levelStr = "SUCC "
+			style = logSuccessStyle
+		}
+
+		line := fmt.Sprintf("%s %s %s",
+			timestampStyle.Render(timestamp),
+			style.Render(levelStr),
+			style.Render(entry.Message))
+		lines = append(lines, line)
+	}
+
+	// Pad with empty lines if needed
+	for len(lines) < lv.maxVisible {
+		lines = append(lines, "")
+	}
+
+	content := strings.Join(lines, "\n")
+
+	containerStyle := logContainerStyle
+	if lv.focused {
+		containerStyle = logFocusedStyle
+	}
+
+	return containerStyle.Render(content)
 }
 
 func (m *model) loadBranches() error {
@@ -116,20 +342,33 @@ func (m *model) setupTable() {
 }
 
 func (m *model) switchToBranch(branchName string) error {
+	m.logInfo("Attempting to switch to branch: %s", branchName)
+
 	// Check for uncommitted changes first
+	m.logDebug("Checking for uncommitted changes...")
 	hasChanges, err := m.gitService.HasUncommittedChanges()
 	if err != nil {
+		m.logError("Failed to check for uncommitted changes: %v", err)
 		return fmt.Errorf("failed to check for uncommitted changes: %v", err)
 	}
 
 	if hasChanges {
+		m.logInfo("Found uncommitted changes, showing commit modal")
 		// Show modal instead of switching immediately
 		m.commitModal.Show(branchName)
 		return nil
 	}
 
+	m.logDebug("No uncommitted changes found, switching directly")
 	// No uncommitted changes, switch directly
-	return m.gitService.SwitchToBranch(branchName)
+	err = m.gitService.SwitchToBranch(branchName)
+	if err != nil {
+		m.logError("Failed to switch to branch %s: %v", branchName, err)
+		return err
+	}
+
+	m.logSuccess("Successfully switched to branch: %s", branchName)
+	return nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -139,27 +378,143 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	// Handle modal interactions first if modal is visible
+	if m.commitModal.IsVisible() {
+		m.logDebug("Modal is visible, processing modal input")
+		modal, modalCmd := m.commitModal.Update(msg)
+		m.commitModal = modal
+
+		// Check if modal action was taken
+		action := m.commitModal.GetAction()
+		if action != ModalActionNone {
+			targetBranch := m.commitModal.GetTargetBranch()
+			m.logInfo("Modal action taken: %d for branch: %s", action, targetBranch)
+
+			switch action {
+			case ModalActionCommit:
+				subject, description := m.commitModal.GetCommitMessage()
+				m.logInfo("User chose to commit changes: '%s'", subject)
+				m.logDebug("Committing changes with message: %s", subject)
+
+				if err := m.gitService.CommitChanges(subject, description); err != nil {
+					m.logError("Failed to commit changes: %v", err)
+					m.message = fmt.Sprintf("Commit failed: %v", err)
+				} else {
+					m.logSuccess("Changes committed successfully")
+					// Now switch to the target branch
+					m.logDebug("Now switching to target branch: %s", targetBranch)
+					if err := m.gitService.SwitchToBranch(targetBranch); err != nil {
+						m.logError("Failed to switch to branch after commit: %v", err)
+						m.message = fmt.Sprintf("Commit succeeded but branch switch failed: %v", err)
+					} else {
+						m.logSuccess("Successfully switched to branch: %s", targetBranch)
+						m.message = fmt.Sprintf("Committed changes and switched to: %s", targetBranch)
+						// Refresh branches to show new current branch at top
+						m.logDebug("Refreshing branch list after successful switch")
+						if err := m.loadBranches(); err != nil {
+							m.logError("Failed to refresh branches: %v", err)
+						} else {
+							m.setupTable()
+							m.logDebug("Branch list refreshed successfully")
+						}
+					}
+				}
+
+			case ModalActionStash:
+				m.logInfo("User chose to stash changes")
+				m.logDebug("Stashing changes for branch: %s", targetBranch)
+
+				if err := m.gitService.StashChanges(targetBranch); err != nil {
+					m.logError("Failed to stash changes: %v", err)
+					m.message = fmt.Sprintf("Stash failed: %v", err)
+				} else {
+					m.logSuccess("Changes stashed successfully")
+					// Now switch to the target branch
+					m.logDebug("Now switching to target branch: %s", targetBranch)
+					if err := m.gitService.SwitchToBranch(targetBranch); err != nil {
+						m.logError("Failed to switch to branch after stash: %v", err)
+						m.message = fmt.Sprintf("Stash succeeded but branch switch failed: %v", err)
+					} else {
+						m.logSuccess("Successfully switched to branch: %s", targetBranch)
+						m.message = fmt.Sprintf("Stashed changes and switched to: %s", targetBranch)
+						// Refresh branches to show new current branch at top
+						m.logDebug("Refreshing branch list after successful switch")
+						if err := m.loadBranches(); err != nil {
+							m.logError("Failed to refresh branches: %v", err)
+						} else {
+							m.setupTable()
+							m.logDebug("Branch list refreshed successfully")
+						}
+					}
+				}
+
+			case ModalActionCancel:
+				m.logInfo("User cancelled modal - staying on current branch")
+				m.message = "Branch switch cancelled"
+			}
+
+			// Hide modal after processing action
+			m.commitModal.Hide()
+			m.logDebug("Modal hidden after processing action")
+		}
+
+		return m, modalCmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
+			m.logInfo("User quit application")
 			m.quitting = true
 			return m, tea.Quit
+		case "tab":
+			// Toggle focus between table and logs
+			m.logViewer.ToggleFocus()
+			if m.logViewer.focused {
+				m.logDebug("Switched focus to logs (use ↑↓ to scroll)")
+			} else {
+				m.logDebug("Switched focus to table")
+			}
+			return m, nil
+		case "l":
+			// Clear logs
+			m.clearLogs()
+			m.logInfo("Logs cleared")
+			return m, nil
+		case "up":
+			if m.logViewer.focused {
+				m.logViewer.ScrollUp()
+				return m, nil
+			}
+		case "down":
+			if m.logViewer.focused {
+				m.logViewer.ScrollDown()
+				return m, nil
+			}
 		case "enter":
 			// Get selected branch and switch to it
 			if len(m.branches) > 0 {
 				selectedRow := m.tableManager.GetCursor()
 				if selectedRow < len(m.branches) {
 					branchName := m.branches[selectedRow].Name
+					m.logInfo("User selected branch: %s", branchName)
 					if err := m.switchToBranch(branchName); err != nil {
+						m.logError("Error in switchToBranch: %v", err)
 						m.message = fmt.Sprintf("Error: %v", err)
 					} else {
-						m.message = fmt.Sprintf("Switched to branch: %s", branchName)
-						// Refresh branches after switching - this will move the selected branch to top
-						if err := m.loadBranches(); err != nil {
-							m.err = err
-						} else {
-							m.setupTable()
+						// Only set success message if no modal was shown
+						if !m.commitModal.IsVisible() {
+							m.message = fmt.Sprintf("Switched to branch: %s", branchName)
+							// Refresh branches after switching - this will move the selected branch to top
+							m.logDebug("Refreshing branch list after switch")
+							if err := m.loadBranches(); err != nil {
+								m.logError("Failed to refresh branches: %v", err)
+								m.err = err
+							} else {
+								m.setupTable()
+								m.logDebug("Branch list refreshed successfully")
+							}
 						}
 					}
 				}
@@ -167,12 +522,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			// Refresh branches
+			m.logInfo("User requested branch refresh")
 			m.message = "Refreshing..."
 			if err := m.loadBranches(); err != nil {
+				m.logError("Failed to refresh branches: %v", err)
 				m.err = err
 			} else {
 				m.setupTable()
 				m.message = "Refreshed!"
+				m.logSuccess("Branch list refreshed successfully")
 			}
 			return m, nil
 		case "c":
@@ -182,10 +540,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Update table
-	table, tableCmd := m.tableManager.UpdateTable(msg)
-	m.tableManager.table = table
-	cmd = tableCmd
+	// Update table only if logs are not focused
+	if !m.logViewer.focused {
+		table, tableCmd := m.tableManager.UpdateTable(msg)
+		m.tableManager.table = table
+		cmd = tableCmd
+	}
 
 	return m, cmd
 }
@@ -211,7 +571,17 @@ func (m model) View() string {
 	}
 
 	title := titleStyle.Render(titleText)
-	help := helpStyle.Render("↑/↓: navigate • enter: switch branch • r: refresh • c: clear message • q: quit")
+
+	// Log section title with focus indicator
+	var logTitle string
+	if m.logViewer.focused {
+		logTitle = logTitleStyle.Render("Debug Logs: [FOCUSED - ↑↓ to scroll]")
+	} else {
+		logTitle = logTitleStyle.Render("Debug Logs:")
+	}
+
+	// Help text with new shortcuts
+	help := helpStyle.Render("↑/↓: navigate/scroll • enter: switch • tab: focus logs • l: clear logs • r: refresh • q: quit")
 
 	var messageView string
 	if m.message != "" {
@@ -224,9 +594,17 @@ func (m model) View() string {
 		"",
 		m.tableManager.View(),
 		"",
+		logTitle,
+		m.logViewer.View(),
+		"",
 		messageView,
 		help,
 	)
+
+	// Show modal overlay if modal is visible
+	if m.commitModal.IsVisible() {
+		return m.commitModal.ViewOverlay(content)
+	}
 
 	return content
 }
