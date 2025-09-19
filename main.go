@@ -100,21 +100,42 @@ var (
 			BorderForeground(lipgloss.Color("39")).
 			Padding(0, 1).
 			Height(8)
+
+	// Commit preview styles
+	commitContainerStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1).
+				Height(6)
+
+	commitTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("205")).
+				Bold(true)
+
+	commitHashStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39"))
+
+	commitAuthorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("226"))
+
+	commitTimeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241"))
 )
 
 type model struct {
-	tableManager  *TableManager
-	gitService    *GitService
-	commitModal   *CommitModal
-	logViewer     *LogViewer
-	branches      []Branch
-	err           error
-	count         int
-	message       string
-	quitting      bool
-	includeRemote bool
-	authors       []string
-	logs          []string // Keep for backward compatibility
+	tableManager    *TableManager
+	gitService      *GitService
+	commitModal     *CommitModal
+	logViewer       *LogViewer
+	branches        []Branch
+	selectedCommits []Commit
+	err             error
+	count           int
+	message         string
+	quitting        bool
+	includeRemote   bool
+	authors         []string
+	logs            []string // Keep for backward compatibility
 }
 
 func main() {
@@ -146,13 +167,14 @@ func main() {
 	}
 
 	m := model{
-		count:         *count,
-		includeRemote: *includeRemote,
-		authors:       authors,
-		tableManager:  NewTableManager(),
-		gitService:    NewGitService(),
-		commitModal:   NewCommitModal(),
-		logViewer:     NewLogViewer(),
+		count:           *count,
+		includeRemote:   *includeRemote,
+		authors:         authors,
+		tableManager:    NewTableManager(),
+		gitService:      NewGitService(),
+		commitModal:     NewCommitModal(),
+		logViewer:       NewLogViewer(),
+		selectedCommits: []Commit{},
 	}
 
 	// Add initial startup logging
@@ -336,6 +358,36 @@ func (m *model) loadBranches() error {
 
 func (m *model) setupTable() {
 	m.tableManager.SetupTable(m.branches)
+	// Load commits for the first branch (selected by default)
+	if len(m.branches) > 0 {
+		m.loadCommitsForSelectedBranch()
+	}
+}
+
+func (m *model) loadCommitsForSelectedBranch() {
+	if len(m.branches) == 0 {
+		m.selectedCommits = []Commit{}
+		return
+	}
+
+	selectedRow := m.tableManager.GetCursor()
+	if selectedRow >= len(m.branches) {
+		m.selectedCommits = []Commit{}
+		return
+	}
+
+	branchName := m.branches[selectedRow].Name
+	m.logDebug("Loading commits for selected branch: %s", branchName)
+
+	commits, err := m.gitService.GetBranchCommits(branchName, 5) // Show last 5 commits
+	if err != nil {
+		m.logError("Failed to load commits for branch %s: %v", branchName, err)
+		m.selectedCommits = []Commit{}
+		return
+	}
+
+	m.selectedCommits = commits
+	m.logDebug("Loaded %d commits for branch %s", len(commits), branchName)
 }
 
 func (m *model) switchToBranch(branchName string) error {
@@ -558,9 +610,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Update table only if logs are not focused
 	if !m.logViewer.focused {
+		oldCursor := m.tableManager.GetCursor()
 		table, tableCmd := m.tableManager.UpdateTable(msg)
 		m.tableManager.table = table
 		cmd = tableCmd
+
+		// Check if cursor position changed to load commits for new selection
+		newCursor := m.tableManager.GetCursor()
+		if oldCursor != newCursor {
+			m.loadCommitsForSelectedBranch()
+		}
 	}
 
 	return m, cmd
@@ -588,6 +647,9 @@ func (m model) View() string {
 
 	title := titleStyle.Render(titleText)
 
+	// Commit preview section
+	commitPreview := m.renderCommitPreview()
+
 	// Log section title with focus indicator
 	var logTitle string
 	if m.logViewer.focused {
@@ -610,6 +672,8 @@ func (m model) View() string {
 		"",
 		m.tableManager.View(),
 		"",
+		commitPreview,
+		"",
 		logTitle,
 		m.logViewer.View(),
 		"",
@@ -623,6 +687,46 @@ func (m model) View() string {
 	}
 
 	return content
+}
+
+func (m model) renderCommitPreview() string {
+	if len(m.branches) == 0 {
+		return commitContainerStyle.Render("No branches available")
+	}
+
+	selectedRow := m.tableManager.GetCursor()
+	if selectedRow >= len(m.branches) {
+		return commitContainerStyle.Render("No branch selected")
+	}
+
+	branchName := m.branches[selectedRow].Name
+	commitTitle := commitTitleStyle.Render(fmt.Sprintf("Recent Commits - %s:", branchName))
+
+	if len(m.selectedCommits) == 0 {
+		emptyMsg := "No commits found or loading..."
+		return commitContainerStyle.Render(lipgloss.JoinVertical(lipgloss.Left, commitTitle, "", emptyMsg))
+	}
+
+	var commitLines []string
+	commitLines = append(commitLines, commitTitle)
+	commitLines = append(commitLines, "")
+
+	for _, commit := range m.selectedCommits {
+		commitLine := fmt.Sprintf("%s %s %s - %s",
+			commitHashStyle.Render(commit.Hash),
+			commitTimeStyle.Render(commit.RelativeTime),
+			commitAuthorStyle.Render(commit.Author),
+			truncateString(commit.Subject, 50))
+		commitLines = append(commitLines, commitLine)
+	}
+
+	// Pad with empty lines to maintain consistent height
+	for len(commitLines) < 6 {
+		commitLines = append(commitLines, "")
+	}
+
+	content := strings.Join(commitLines, "\n")
+	return commitContainerStyle.Render(content)
 }
 
 func getRemoteText(includeRemote bool) string {
