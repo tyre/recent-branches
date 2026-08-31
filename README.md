@@ -1,11 +1,19 @@
 # recent-branches
 
-![recent-branches Demo](https://github-production-user-asset-6210df.s3.amazonaws.com/1015847/643321671-ba87bf49-3651-4a76-892b-22bdbaecc63a.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20260831%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260831T032252Z&X-Amz-Expires=300&X-Amz-Signature=36b6a1b16eff32edc9ec02bc4388d6d923ef0fdb4b4fab5903eaaaaa6eb15c78&X-Amz-SignedHeaders=host&response-content-type=image%2Fpng)
-
-
 A terminal UI for switching between your recent git branches. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+![recent-branches Demo](https://github.com/user-attachments/assets/b0966d8f-9d8e-4c40-a7af-fc98d9e2d342)
+
 It lists your most recently active branches in a table, shows the last few commits on whichever branch you highlight, and switches when you hit enter. If you have uncommitted changes, a modal asks whether to commit or stash them first.
+
+Supports diffing to see what's on those dusty old branches
+
+![Diff preview](https://github.com/user-attachments/assets/ae0f3bbf-239a-4e7f-bbd2-5e7dc42714be)
+
+With per-file view
+
+![Diff file wahooooo](https://github.com/user-attachments/assets/43e12e23-416e-41cf-aff6-3ad52d9db4dd)
+
 
 ## Install
 
