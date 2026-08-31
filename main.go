@@ -126,6 +126,7 @@ type model struct {
 	tableManager    *TableManager
 	gitService      *GitService
 	commitModal     *CommitModal
+	diffView        *DiffView
 	logViewer       *LogViewer
 	branches        []Branch
 	selectedCommits []Commit
@@ -135,6 +136,7 @@ type model struct {
 	quitting        bool
 	includeRemote   bool
 	authors         []string
+	debug           bool
 	logs            []string // Keep for backward compatibility
 }
 
@@ -143,6 +145,7 @@ func main() {
 		count         = flag.Int("n", 10, "Number of branches to show")
 		includeRemote = flag.Bool("remote", false, "Include remote branches")
 		authorFlag    = flag.String("author", "", "Filter by author(s). Use 'mine' for your commits, 'all' for everyone, or comma-separated usernames")
+		debug         = flag.Bool("debug", false, "Enable debug logging and show the logs panel")
 	)
 	flag.Parse()
 
@@ -170,9 +173,11 @@ func main() {
 		count:           *count,
 		includeRemote:   *includeRemote,
 		authors:         authors,
+		debug:           *debug,
 		tableManager:    NewTableManager(),
 		gitService:      NewGitService(),
 		commitModal:     NewCommitModal(),
+		diffView:        NewDiffView(NewGitService()),
 		logViewer:       NewLogViewer(),
 		selectedCommits: []Commit{},
 	}
@@ -209,6 +214,9 @@ func (m *model) addLog(msg string, args ...interface{}) {
 
 // Enhanced logging methods
 func (m *model) logDebug(msg string, args ...interface{}) {
+	if !m.debug {
+		return
+	}
 	m.addLogEntry(DEBUG, msg, args...)
 }
 
@@ -446,6 +454,17 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.diffView.SetSize(sizeMsg.Width, sizeMsg.Height)
+	}
+
+	// Route input to the diff view while it's open
+	if m.diffView.IsVisible() {
+		diffView, diffCmd := m.diffView.Update(msg)
+		m.diffView = diffView
+		return m, diffCmd
+	}
+
 	// Handle modal interactions first if modal is visible
 	if m.commitModal.IsVisible() {
 		m.logDebug("Modal is visible, processing modal input")
@@ -537,6 +556,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "tab":
+			if !m.debug {
+				return m, nil
+			}
 			// Toggle focus between table and logs
 			m.logViewer.ToggleFocus()
 			if m.logViewer.focused {
@@ -546,6 +568,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "l":
+			if !m.debug {
+				return m, nil
+			}
 			// Clear logs
 			m.clearLogs()
 			m.logInfo("Logs cleared")
@@ -585,6 +610,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 					}
+				}
+			}
+			return m, nil
+		case "d":
+			// Open diff view for the selected branch vs the current branch
+			if len(m.branches) > 0 {
+				selectedRow := m.tableManager.GetCursor()
+				if selectedRow < len(m.branches) {
+					target := gitRefName(m.branches[selectedRow].Name)
+					base, err := m.gitService.GetCurrentBranch()
+					if err != nil {
+						m.logError("Failed to get current branch: %v", err)
+						m.message = fmt.Sprintf("Error: %v", err)
+						return m, nil
+					}
+
+					baseOptions := make([]string, 0, len(m.branches))
+					seen := map[string]bool{}
+					if !seen[base] {
+						baseOptions = append(baseOptions, base)
+						seen[base] = true
+					}
+					for _, b := range m.branches {
+						ref := gitRefName(b.Name)
+						if !seen[ref] {
+							baseOptions = append(baseOptions, ref)
+							seen[ref] = true
+						}
+					}
+
+					m.logInfo("Opening diff view: %s...%s", base, target)
+					m.diffView.Show(base, target, baseOptions)
 				}
 			}
 			return m, nil
@@ -634,6 +691,10 @@ func (m model) View() string {
 		return errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
+	if m.diffView.IsVisible() {
+		return m.diffView.View()
+	}
+
 	var titleText string
 	if len(m.authors) > 0 && m.authors[0] != "all" {
 		authorText := strings.Join(m.authors, ", ")
@@ -650,35 +711,44 @@ func (m model) View() string {
 	// Commit preview section
 	commitPreview := m.renderCommitPreview()
 
-	// Log section title with focus indicator
-	var logTitle string
-	if m.logViewer.focused {
-		logTitle = logTitleStyle.Render("Debug Logs: [FOCUSED - ↑↓ to scroll]")
-	} else {
-		logTitle = logTitleStyle.Render("Debug Logs:")
-	}
-
-	// Help text with new shortcuts
-	help := helpStyle.Render("↑/↓: navigate/scroll • enter: switch • tab: focus logs • l: clear logs • r: refresh • q: quit")
-
 	var messageView string
 	if m.message != "" {
 		messageView = successStyle.Render(m.message)
 	}
 
-	content := lipgloss.JoinVertical(
-		lipgloss.Left,
+	sections := []string{
 		title,
 		"",
 		m.tableManager.View(),
 		"",
 		commitPreview,
 		"",
-		logTitle,
-		m.logViewer.View(),
-		"",
-		messageView,
-		help,
+	}
+
+	if m.debug {
+		// Log section title with focus indicator
+		var logTitle string
+		if m.logViewer.focused {
+			logTitle = logTitleStyle.Render("Debug Logs: [FOCUSED - ↑↓ to scroll]")
+		} else {
+			logTitle = logTitleStyle.Render("Debug Logs:")
+		}
+		sections = append(sections, logTitle, m.logViewer.View(), "")
+	}
+
+	// Help text with new shortcuts
+	var help string
+	if m.debug {
+		help = helpStyle.Render("↑/↓: navigate/scroll • enter: switch • d: diff • tab: focus logs • l: clear logs • r: refresh • q: quit")
+	} else {
+		help = helpStyle.Render("↑/↓: navigate • enter: switch • d: diff • r: refresh • q: quit")
+	}
+
+	sections = append(sections, messageView, help)
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		sections...,
 	)
 
 	// Show modal overlay if modal is visible

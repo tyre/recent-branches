@@ -27,6 +27,7 @@ recent-branches -n 20            # show more
 recent-branches -remote          # include remote branches
 recent-branches -author all      # everyone's branches
 recent-branches -author a,b      # specific authors
+recent-branches -debug           # enable debug logging and the logs panel
 ```
 
 By default it shows only branches you have committed to.
@@ -37,11 +38,20 @@ By default it shows only branches you have committed to.
 | --- | --- |
 | `↑` / `↓` | Move through branches (or scroll logs when focused) |
 | `enter` | Switch to the selected branch |
-| `tab` | Toggle focus between table and debug logs |
+| `d` | Diff the selected branch against the current branch |
+| `tab` | Toggle focus between table and debug logs (requires `-debug`) |
 | `r` | Refresh the branch list |
-| `l` | Clear debug logs |
+| `l` | Clear debug logs (requires `-debug`) |
 | `c` | Clear the status message |
 | `q` / `ctrl+c` | Quit |
+
+### Diff view
+
+Press `d` on a highlighted branch to see what it changes relative to the
+current branch (three-dot diff, so: commits on that branch since it diverged).
+A summary line shows total files and +/- counts. Files start collapsed with
+their own +/- counts; move with `↑`/`↓`, expand one with `space`/`enter`.
+Press `b` to pick a different base branch, `esc`/`q` to go back.
 
 ## Development
 

@@ -421,6 +421,81 @@ func (g *GitService) GetFileDiff(filePath string) (string, error) {
 	return diff, nil
 }
 
+// DiffFile represents one file in a branch-to-branch diff
+type DiffFile struct {
+	Path    string
+	Added   int
+	Deleted int
+	Binary  bool
+}
+
+// gitRefName converts a display branch name to a git ref name
+func gitRefName(displayName string) string {
+	if strings.HasSuffix(displayName, " (remote)") {
+		return "origin/" + strings.TrimSuffix(displayName, " (remote)")
+	}
+	return displayName
+}
+
+// numstatNewPath extracts the new path from a numstat rename entry
+// like "dir/{old.go => new.go}" or "old.go => new.go"
+func numstatNewPath(p string) string {
+	if !strings.Contains(p, " => ") {
+		return p
+	}
+	open := strings.Index(p, "{")
+	closing := strings.Index(p, "}")
+	if open >= 0 && closing > open {
+		mid := p[open+1 : closing]
+		parts := strings.SplitN(mid, " => ", 2)
+		return p[:open] + parts[1] + p[closing+1:]
+	}
+	parts := strings.SplitN(p, " => ", 2)
+	return parts[1]
+}
+
+// GetDiffStats returns per-file stats for base...target (changes on target
+// since it diverged from base)
+func (g *GitService) GetDiffStats(base, target string) ([]DiffFile, error) {
+	cmd := exec.Command("git", "diff", "--numstat", base+"..."+target)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to diff %s...%s: %v", base, target, err)
+	}
+
+	var files []DiffFile
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+
+		file := DiffFile{Path: numstatNewPath(parts[2])}
+		if parts[0] == "-" || parts[1] == "-" {
+			file.Binary = true
+		} else {
+			file.Added = parseInt(parts[0])
+			file.Deleted = parseInt(parts[1])
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+// GetDiffForFile returns the unified diff for one file in base...target
+func (g *GitService) GetDiffForFile(base, target, path string) (string, error) {
+	cmd := exec.Command("git", "diff", base+"..."+target, "--", path)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to diff file %s: %v", path, err)
+	}
+	return string(output), nil
+}
+
 func (g *GitService) CommitChanges(subject, description string) error {
 	// Stage all changes first
 	stageCmd := exec.Command("git", "add", "-A")
